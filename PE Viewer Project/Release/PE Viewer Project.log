@@ -1,0 +1,8 @@
+﻿  WinMain.cpp
+WinMain.cpp(434): warning C4477: 'sprintf' : 서식 문자열 '%s'에 'char *' 형식의 인수가 필요하지만 variadic 인수 1의 형식이 'WORD *'입니다.
+WinMain.cpp(562): warning C4477: 'sprintf' : 서식 문자열 '%s'에 'char *' 형식의 인수가 필요하지만 variadic 인수 1의 형식이 'DWORD *'입니다.
+  코드를 생성하고 있습니다.
+  All 11 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  코드를 생성했습니다.
+  PE Viewer Project.vcxproj -> C:\Users\Administrator\source\repos\PE Viewer Project\Release\PE Viewer Project.exe
+  PE Viewer Project.vcxproj -> C:\Users\Administrator\source\repos\PE Viewer Project\Release\PE Viewer Project.pdb (Full PDB)
