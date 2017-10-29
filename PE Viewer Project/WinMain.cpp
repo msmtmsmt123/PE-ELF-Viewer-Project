@@ -11,6 +11,12 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include "resource.h"
+#include "elf_header.h"
+#include "elf_type.h"
+#include "pro_header.h"
+#include "pro_type.h"
+#include "sh_header.h"
+#include "sh_type.h"
 #pragma comment (lib, "comctl32.lib")
 
 #define TOOLBAR_ID 200
@@ -116,8 +122,8 @@ PVOID base_ptr;
 DWORD global_RVA;
 DWORD local_RVA;
 
-LISTVIEW listview[50];
-BODYLISTVIEW * body_listview;
+LISTVIEW listview[50] = { 0, };
+BODYLISTVIEW * body_listview = 0;
 
 BOOL data_directories_present[16] = {
 	FALSE, FALSE, FALSE, FALSE, FALSE,
@@ -132,6 +138,15 @@ WCHAR * DATA_DIRECTORY_STR[16] = {
 	L"LOAD_CONFIGURATION_TABLE", L"BOUND_IMPORT_TABLE", L"IMPORT_ADDRESS_TABLE", L"DELAY_IMPORT_DESCRIPTORS", L"CLI_HEADER",
 	L"NULL_STRUCTURE"
 };
+
+Elf32_Ehdr * elfheader;
+Pro32_Phdr * proheader;
+Sh32_shdr * shheader;
+E_IDENT * ei;
+int m = 0, t = 0, v = 0, c = 0, s = 0; // machine, type, version, class
+WCHAR * machine = 0, *version = 0, *cls = 0, *ptype = 0, *pflag = 0, *sflag = 0, *stype = 0, *etype = 0;
+char * strtbladdr = 0;
+int num = 0;
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 VOID Initialize(HWND hWnd, WCHAR * StrOfFile);
@@ -226,7 +241,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					}
 				}
 
-				if (changed != TRUE) {
+				if (changed != TRUE && !IsBadReadPtr(file_header, sizeof(PIMAGE_FILE_HEADER))) {
 					for (int i = 0; i < file_header->NumberOfSections; i++) {
 						LONG Style = GetWindowLong(body_listview[i].hList, GWL_STYLE);
 						if (check_bit(Style, WS_VISIBLE)) {
@@ -246,7 +261,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					}
 				}
 
-				if (changed != TRUE) {
+				if (changed != TRUE && !IsBadReadPtr(file_header, sizeof(PIMAGE_FILE_HEADER))) {
 					for (int i = 0; i < file_header->NumberOfSections; i++) {
 						if (body_listview[i].treeitem == temp) {
 							SetWindowLong(body_listview[i].hList, GWL_STYLE, WS_CHILD | WS_BORDER | WS_VISIBLE | LVS_REPORT);
@@ -328,25 +343,39 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 	RECT rect;
-	WCHAR temp[50] = { 0, };
+	TCHAR temp[50] = { 0, };
 
 	int NumOfTreeitems = 0;
 	int itemnumber = 0;
 
 	TVINSERTSTRUCT COL;
-
 	LVCOLUMN LV;
 	LVITEM IT;
 
 	__try {
-
 		hFile = CreateFile(StrOfFile, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
 		hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-
 		base_ptr = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+		
 		dos_header = (PIMAGE_DOS_HEADER)base_ptr;
-		nt_header = (PIMAGE_NT_HEADERS)((DWORD)dos_header + (DWORD)dos_header->e_lfanew);
+		elfheader = (Elf32_Ehdr*)base_ptr;
+		
+		DWORD elfcmp = 0x464C457F;
+		WORD pecmp = IMAGE_DOS_SIGNATURE;
+		
+		if (!memcmp(dos_header, &pecmp, sizeof(WORD))) {
+			goto PE_FORMAT;
+		}
+		else if (!memcmp(elfheader, &elfcmp, sizeof(DWORD))) {
+			goto ELF_FORMAT;
+		}
+		else {
+			MessageBox(hWnd, L"죄송하지만 이 파일은 PE/ELF 포맷이 아닌 것 같습니다.", L"파일 오픈 에러", MB_OK);
+			return;
+		}
 
+		PE_FORMAT:
+		nt_header = (PIMAGE_NT_HEADERS)((DWORD)dos_header + (DWORD)dos_header->e_lfanew);
 		file_header = (PIMAGE_FILE_HEADER)(&nt_header->FileHeader);
 
 		if (file_header->Machine != IMAGE_FILE_MACHINE_I386) {
@@ -462,7 +491,7 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 
 		NumOfTreeitems++;
 		//----------------------------------------------------
-		COL.item.pszText = L"MS-DOS Stub Codes";
+		COL.item.pszText = L"MS-DOS Stub Program";
 		listview[NumOfTreeitems].treeitem = TreeView_InsertItem(hTree, &COL);
 
 		listview[NumOfTreeitems].hList = CreateWindowEx(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME, WC_LISTVIEW, NULL, WS_CHILD | WS_BORDER | LVS_REPORT,
@@ -581,20 +610,25 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 
 		SendMessage(listview[NumOfTreeitems].hList, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);
 
-		LV.cx = (rect.right / 2 - 20) / 3;
+		LV.cx = (rect.right / 2 - 20) / 4;
 		LV.iSubItem = 0;
 		LV.pszText = L"DATA";
 		ListView_InsertColumn(listview[NumOfTreeitems].hList, 0, &LV);
 
-		LV.cx = (rect.right / 2 - 20) / 3;
+		LV.cx = (rect.right / 2 - 20) / 4;
 		LV.iSubItem = 1;
 		LV.pszText = L"DESCRIPTION";
 		ListView_InsertColumn(listview[NumOfTreeitems].hList, 1, &LV);
 
-		LV.cx = (rect.right / 2 - 20) / 3;
+		LV.cx = (rect.right / 2 - 20) / 4;
 		LV.iSubItem = 2;
 		LV.pszText = L"RVA";
 		ListView_InsertColumn(listview[NumOfTreeitems].hList, 2, &LV);
+
+		LV.cx = (rect.right / 2 - 20) / 4;
+		LV.iSubItem = 3;
+		LV.pszText = L"STRINGS";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 3, &LV);
 
 		IT.iItem = 0;
 		IT.iSubItem = 0;
@@ -644,6 +678,11 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.iSubItem = 2;
 		wsprintf(temp, L"%X", global_RVA);
 		global_RVA += 0x4;
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 3;
+		wsprintf(temp, L"%u/%02d/%02d %d:%d:%d", sys_time.wYear, sys_time.wMonth, sys_time.wDay, sys_time.wHour, sys_time.wMinute, sys_time.wSecond);
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
@@ -725,20 +764,25 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 
 		SendMessage(listview[NumOfTreeitems].hList, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);
 
-		LV.cx = (rect.right / 2 - 20) / 3;
+		LV.cx = (rect.right / 2 - 20) / 4;
 		LV.iSubItem = 0;
 		LV.pszText = L"DATA";
 		ListView_InsertColumn(listview[NumOfTreeitems].hList, 0, &LV);
 
-		LV.cx = (rect.right / 2 - 20) / 3;
+		LV.cx = (rect.right / 2 - 20) / 4;
 		LV.iSubItem = 1;
 		LV.pszText = L"DESCRIPTION";
 		ListView_InsertColumn(listview[NumOfTreeitems].hList, 1, &LV);
 
-		LV.cx = (rect.right / 2 - 20) / 3;
+		LV.cx = (rect.right / 2 - 20) / 4;
 		LV.iSubItem = 2;
 		LV.pszText = L"RVA";
 		ListView_InsertColumn(listview[NumOfTreeitems].hList, 2, &LV);
+
+		LV.cx = (rect.right / 2 - 20) / 4;
+		LV.iSubItem = 3;
+		LV.pszText = L"STRINGS";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 3, &LV);
 
 		IT.iItem = 0;
 		IT.iSubItem = 0;
@@ -1131,6 +1175,85 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
+		if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_UNKNOWN)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_UNKNOWN");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_NATIVE)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_NATIVE");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_WINDOWS_GUI)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_WINDOWS_GUI");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_WINDOWS_CUI)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_WINDOWS_CUI");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_OS2_CUI)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_OS2_CUI");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_POSIX_CUI)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_POSIX_CUI");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_WINDOWS_CE_GUI)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_CE_GUI");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_EFI_APPLICATION)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_EFI_APPLICATION");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_EFI_RUNTIME_DRIVER");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_EFI_ROM)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_EFI_ROM");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if (check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_XBOX)) {
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_XBOX");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+		else if(check_bit(optional_header->Subsystem, IMAGE_SUBSYSTEM_WINDOWS_BOOT_APPLICATION)){
+			IT.iSubItem = 3;
+			wsprintf(temp, L"%s", L"IMAGE_SUBSYSTEM_WINDOWS_BOOT_APPLICATION");
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
 		IT.iItem = 23;
 		IT.iSubItem = 0;
 		wsprintf(temp, L"%04X", optional_header->DllCharacteristics);
@@ -1148,7 +1271,73 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-		IT.iItem = 24;
+		DWORD dwDllCharacteristicsItems = 24;
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_FORCE_INTEGRITY");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_NX_COMPAT)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_NX_COMPAT");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_NO_ISOLATION)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_NO_ISOLATION");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_NO_SEH)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_NO_SEH");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_NO_BIND)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_NO_BIND");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_WDM_DRIVER)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_WDM_DRIVER");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		if (check_bit(optional_header->DllCharacteristics, IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE)) {
+			IT.iItem = dwDllCharacteristicsItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"%s", L"IMAGE_DLLCHARACTERISTICS_TERMINAL_SERVER_AWARE");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+		}
+
+		IT.iItem = dwDllCharacteristicsItems++;
 		IT.iSubItem = 0;
 		wsprintf(temp, L"%08X", optional_header->SizeOfStackReserve);
 		IT.pszText = temp;
@@ -1165,7 +1354,7 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-		IT.iItem = 25;
+		IT.iItem = dwDllCharacteristicsItems++;
 		IT.iSubItem = 0;
 		wsprintf(temp, L"%08X", optional_header->SizeOfStackCommit);
 		IT.pszText = temp;
@@ -1182,7 +1371,7 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-		IT.iItem = 26;
+		IT.iItem = dwDllCharacteristicsItems++;
 		IT.iSubItem = 0;
 		wsprintf(temp, L"%08X", optional_header->SizeOfHeapReserve);
 		IT.pszText = temp;
@@ -1199,7 +1388,7 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-		IT.iItem = 27;
+		IT.iItem = dwDllCharacteristicsItems++;
 		IT.iSubItem = 0;
 		wsprintf(temp, L"%08X", optional_header->SizeOfHeapCommit);
 		IT.pszText = temp;
@@ -1216,7 +1405,7 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-		IT.iItem = 28;
+		IT.iItem = dwDllCharacteristicsItems++;
 		IT.iSubItem = 0;
 		wsprintf(temp, L"%08X", optional_header->LoaderFlags);
 		IT.pszText = temp;
@@ -1233,7 +1422,7 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-		IT.iItem = 29;
+		IT.iItem = dwDllCharacteristicsItems;
 		IT.iSubItem = 0;
 		wsprintf(temp, L"%08X", optional_header->NumberOfRvaAndSizes);
 		IT.pszText = temp;
@@ -1250,38 +1439,8 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 		IT.pszText = temp;
 		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-		NumOfTreeitems++;
-		//----------------------------------------------------------
-		COL.item.pszText = L"IMAGE_DATA_DIRECTORY";
-		listview[NumOfTreeitems].treeitem = TreeView_InsertItem(hTree, &COL);
-
-		listview[NumOfTreeitems].hList = CreateWindowEx(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME, WC_LISTVIEW, NULL, WS_CHILD | WS_BORDER | LVS_REPORT,
-			rect.right / 2 + 10, rect.top + 50, rect.right / 2 - 20, rect.bottom - 70, hWnd, NULL, hInst, NULL);
-
-		SendMessage(listview[NumOfTreeitems].hList, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);
-
-		LV.cx = (rect.right / 2 - 20) / 4;
-		LV.iSubItem = 0;
-		LV.pszText = L"DATA";
-		ListView_InsertColumn(listview[NumOfTreeitems].hList, 0, &LV);
-
-		LV.cx = (rect.right / 2 - 20) / 4;
-		LV.iSubItem = 1;
-		LV.pszText = L"DESCRIPTION";
-		ListView_InsertColumn(listview[NumOfTreeitems].hList, 1, &LV);
-
-		LV.cx = (rect.right / 2 - 20) / 4;
-		LV.iSubItem = 2;
-		LV.pszText = L"VALUE";
-		ListView_InsertColumn(listview[NumOfTreeitems].hList, 2, &LV);
-
-		LV.cx = (rect.right / 2 - 20) / 4;
-		LV.iSubItem = 3;
-		LV.pszText = L"RVA";
-		ListView_InsertColumn(listview[NumOfTreeitems].hList, 3, &LV);
-
 		for (int i = 0, j = 0; i < 16; i++) {
-			IT.iItem = j++;
+			IT.iItem = dwDllCharacteristicsItems++;
 			IT.iSubItem = 0;
 			wsprintf(temp, L"%08X", data_directory[i]->Size);
 			IT.pszText = temp;
@@ -1293,16 +1452,16 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
 			IT.iSubItem = 2;
-			IT.pszText = DATA_DIRECTORY_STR[i];
-			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
-
-			IT.iSubItem = 3;
 			wsprintf(temp, L"%X", global_RVA);
 			global_RVA += 0x4;
 			IT.pszText = temp;
 			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-			IT.iItem = j++;
+			IT.iSubItem = 3;
+			IT.pszText = DATA_DIRECTORY_STR[i];
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwDllCharacteristicsItems++;
 			IT.iSubItem = 0;
 			wsprintf(temp, L"%08X", data_directory[i]->VirtualAddress);
 			IT.pszText = temp;
@@ -1313,7 +1472,7 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 			IT.pszText = temp;
 			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
 
-			IT.iSubItem = 3;
+			IT.iSubItem = 2;
 			wsprintf(temp, L"%X", global_RVA);
 			global_RVA += 0x4;
 			IT.pszText = temp;
@@ -1552,6 +1711,247 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 			global_RVA += 0x4;
 			IT.pszText = temp;
 			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			DWORD dwCharacteristics = 10;
+
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_CNT_CODE)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_CNT_CODE");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_CNT_INITIALIZED_DATA)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_CNT_INITIALIZED_DATA");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_CNT_UNINITIALIZED_DATA)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_CNT_UNINITIALIZED_DATA");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_LNK_OTHER)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_LNK_OTHER");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if(check_bit(section_header->Characteristics, IMAGE_SCN_LNK_INFO)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_LNK_INFO");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_LNK_REMOVE)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_LNK_REMOVE");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_LNK_COMDAT)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_LNK_COMDAT");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_NO_DEFER_SPEC_EXC)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_NO_DEFER_SPEC_EXC");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_GPREL)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_GPREL");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_PURGEABLE)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_PURGEABLE");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_LOCKED)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_LOCKED");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_PRELOAD)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_PRELOAD");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_1BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_1BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_2BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_2BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_4BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_4BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_8BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_8BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_16BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_16BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_32BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_32BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_64BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_64BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_128BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_128BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_256BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_256BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_512BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_512BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_1024BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_1024BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_2048BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_2048BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_4096BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_4096BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_ALIGN_8192BYTES)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_ALIGN_8192BYTES");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_LNK_NRELOC_OVFL)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_LNK_NRELOC_OVFL");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_DISCARDABLE)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_DISCARDABLE");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_NOT_CACHED)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_NOT_CACHED");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_NOT_PAGED)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_NOT_PAGED");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_SHARED)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_SHARED");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_EXECUTE)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_EXECUTE");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_READ)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_READ");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
+			if (check_bit(section_header->Characteristics, IMAGE_SCN_MEM_WRITE)) {
+				IT.iItem = dwCharacteristics++;
+				IT.iSubItem = 0;
+				wsprintf(temp, L"%s", L"IMAGE_SCN_MEM_WRITE");
+				IT.pszText = temp;
+				ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+			}
 
 			NumOfTreeitems++;
 
@@ -4294,15 +4694,699 @@ VOID Initialize(HWND hWnd, WCHAR * StrOfFile) {
 			}
 			NumOfTreeitems++;
 		}
+		return;
+	ELF_FORMAT:
+		memset(&ei, 0, sizeof(ei));
+		elfheader = (Elf32_Ehdr*)base_ptr;
+		proheader = (Pro32_Phdr*)((DWORD)base_ptr + elfheader->e_phoff);
+		shheader = (Sh32_shdr*)((DWORD)base_ptr + elfheader->e_shoff);
+		
+		//Elf Version 
+		switch (v = elfheader->e_version) {
+		case 0:
+			version = L"NONE";
+			break;
+		case 1:
+			version = L"CURRENT";
+			break;
+		default:
+			break;
+		}
+		//Elf Class
+		switch (elfheader->e_ident.EI_CLASS) {
+		case 1:
+			cls = L"ELFCLASS32";
+			break;
+		default:
+			MessageBox(0, L"이 프로그램은 64bit를 지원하지 않습니다.", L"파일 로드 실패", MB_OK);
+			return;
+			break;
+		}
+		//System info
+		switch (m = elfheader->e_machine) {
+		case 0:
+			machine = L"EM_NONE";
+			break;
+		case 1:
+			machine = L"EM_M32";
+			break;
+		case 2:
+			machine = L"EM_SPARC";
+			break;
+		case 3:
+			machine = L"EM_386";
+			break;
+		case 4:
+			machine = L"EM_68K";
+			break;
+		case 5:
+			machine = L"EM_88K";
+			break;
+		case 6:
+			machine = L"EM_860";
+			break;
+		case 7:
+			machine = L"EM_MIPS";
+			break;
+		default:
+			break;
+		}
+		//Elf type 
+		switch (t = elfheader->e_type) {
+		case 0:
+			etype = L"NONE";
+			break;
+		case 1:
+			etype = L"Relocatable object file";
+			break;
+		case 2:
+			etype = L"Executable object file";
+			break;
+		case 3:
+			etype = L"Shared object file";
+			break;
+		case 4:
+			etype = L"Core File";
+			break;
+		default:
+			break;
+		}
+		GetClientRect(hWnd, &rect);
+		hTree = CreateWindowEx(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME, WC_TREEVIEW, NULL, WS_CHILD | WS_BORDER | WS_VISIBLE | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT, rect.left + 10, rect.top + 50, rect.right / 2 - 20, rect.bottom - 70, hWnd, NULL, hInst, NULL);
+		SendMessage(hTree, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);		
+		//--------------------------------------
+		COL.hParent = 0;
+		COL.hInsertAfter = TVI_LAST;
+		COL.item.mask = TVIF_TEXT;
+		COL.item.pszText = L"ELF_HEADER";
+		listview[NumOfTreeitems].treeitem = TreeView_InsertItem(hTree, &COL);
+
+		listview[NumOfTreeitems].hList = CreateWindowEx(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME, WC_LISTVIEW, NULL, WS_CHILD | WS_BORDER | LVS_REPORT,
+			rect.right / 2 + 10, rect.top + 50, rect.right / 2 - 20, rect.bottom - 70, hWnd, NULL, hInst, NULL);
+
+		SendMessage(listview[NumOfTreeitems].hList, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);
+
+		LV.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+		LV.fmt = LVCFMT_LEFT;
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 0;
+		LV.pszText = L"DESCRIPTION";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 0, &LV);
+
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 1;
+		LV.pszText = L"DATA";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 1, &LV);
+
+		IT.mask = LVIF_TEXT;
+		IT.iItem = 0;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Class");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%s", cls);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 1;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Type");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%s", etype);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 2;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Machine");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%s", machine);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 3;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Version");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%s", version);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 4;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Entry");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_entry);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 5;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Program Header");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 6;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Offset");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_phoff);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 7;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Entry Size");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_phentsize);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 8;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Number Of Entry");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_phnum);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		
+		IT.iItem = 9;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Section Header");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 10;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Offset");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_shoff);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 11;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Entry Size");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_shentsize);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 12;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"Number Of Entry");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_shnum);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iItem = 13;
+		IT.iSubItem = 0;
+		wsprintf(temp, L"ELF HEADER SIZE");
+		IT.pszText = temp;
+		ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+		IT.iSubItem = 1;
+		wsprintf(temp, L"%X", elfheader->e_ehsize);
+		IT.pszText = temp;
+		ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+		
+		NumOfTreeitems++;
+		//------------------------------------------------------
+		COL.hParent = 0;
+		COL.hInsertAfter = TVI_LAST;
+		COL.item.mask = TVIF_TEXT;
+		COL.item.pszText = L"PROGRAM_HEADER";
+		listview[NumOfTreeitems].treeitem = TreeView_InsertItem(hTree, &COL);
+
+		listview[NumOfTreeitems].hList = CreateWindowEx(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME, WC_LISTVIEW, NULL, WS_CHILD | WS_BORDER | LVS_REPORT,
+			rect.right / 2 + 10, rect.top + 50, rect.right / 2 - 20, rect.bottom - 70, hWnd, NULL, hInst, NULL);
+
+		SendMessage(listview[NumOfTreeitems].hList, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);
+
+		LV.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+		LV.fmt = LVCFMT_LEFT;
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 0;
+		LV.pszText = L"DESCRIPTION";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 0, &LV);
+
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 1;
+		LV.pszText = L"DATA";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 1, &LV);
+
+		DWORD dwProHeaderItems = 0;
+
+		for (int i = 0; i<elfheader->e_phnum; i++) {
+			//program flags 
+			switch (proheader->p_flags) {
+			case 1:
+				pflag = L"X";
+				break;
+			case 2:
+				pflag = L"W";
+				break;
+			case 4:
+				pflag = L"R";
+				break;
+			case 5:
+				pflag = L"RX";
+				break;
+			case 6:
+				pflag = L"RW";
+				break;
+			}
+			//program header type 
+			switch (proheader->p_type) {
+			case 1:
+				ptype = L"LOAD";
+				break;
+			case 2:
+				ptype = L"DYNAMIC";
+				break;
+			case 3:
+				ptype = L"INTERP";
+				break;
+			case 4:
+				ptype = L"NOTE";
+				break;
+			case 5:
+				ptype = L"TLS";
+				break;
+			case 6:
+				ptype = L"PHDR";
+				break;
+			case 0x6474e550:
+				ptype = L"GNU_EH_FRAME";
+				break;
+			case 0x6474e551:
+				ptype = L"GNU_STACK";
+				break;
+			case 0x6474e552:
+				ptype = L"GNU_RELRO";
+				break;
+			default:
+				break;
+			}
+
+			IT.mask = LVIF_TEXT;
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Idx");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%d", i);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Type");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%s", ptype);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Offset");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%08X", proheader->p_offset);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Virtual Address");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%08X", proheader->p_vaddr);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Physical Address");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%08X", proheader->p_paddr);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"File Size");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%04X", proheader->p_filesz);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Virtual Size");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%04X", proheader->p_memsz);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Flags");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%s", pflag);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Align");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%04X", proheader->p_align);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwProHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			DWORD temp = (DWORD)proheader + elfheader->e_phentsize;
+			proheader = (Pro32_Phdr*)temp;
+		}
+
+		NumOfTreeitems++;
+		//-------------------------------------------------
+		COL.hParent = 0;
+		COL.hInsertAfter = TVI_LAST;
+		COL.item.mask = TVIF_TEXT;
+		COL.item.pszText = L"SECTION_HEADER";
+		listview[NumOfTreeitems].treeitem = TreeView_InsertItem(hTree, &COL);
+
+		listview[NumOfTreeitems].hList = CreateWindowEx(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME, WC_LISTVIEW, NULL, WS_CHILD | WS_BORDER | LVS_REPORT,
+			rect.right / 2 + 10, rect.top + 50, rect.right / 2 - 20, rect.bottom - 70, hWnd, NULL, hInst, NULL);
+
+		SendMessage(listview[NumOfTreeitems].hList, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);
+
+		LV.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+		LV.fmt = LVCFMT_LEFT;
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 0;
+		LV.pszText = L"DESCRIPTION";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 0, &LV);
+
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 1;
+		LV.pszText = L"DATA";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 1, &LV);
+
+		Sh32_shdr * backup = shheader;
+		for (int x = 0; x < elfheader->e_shnum; x++, backup++) {
+			if (x == elfheader->e_shstrndx) {
+				strtbladdr = (char *)base_ptr + backup->sh_offset;
+				break;
+			}
+		}
+
+		DWORD dwSecHeaderItems = 0;
+		for (Elf32_Half i = 0; i < elfheader->e_shnum; i++) {
+			switch (shheader->sh_flags) {
+			case 1:
+				sflag = L"X";
+				break;
+			case 2:
+				sflag = L"A";
+				break;
+			case 3:
+				sflag = L"WA";
+				break;
+			case 6:
+				sflag = L"AX";
+				break;
+			default:
+				sflag = L"";
+				break;
+			}
+			//Section header type
+			switch (shheader->sh_type) {
+			case 0:
+				stype = L"NULL";
+				break;
+			case 1:
+				stype = L"PROGBITS";
+				break;
+			case 2:
+				stype = L"SYMTAB";
+				break;
+			case 3:
+				stype = L"STRTAB";
+				break;
+			case 4:
+				stype = L"RELA";
+				break;
+			case 0x6ffffff6:
+				stype = L"GNU_HASH";
+				break;
+			case 6:
+				stype = L"DYNAMIC";
+				break;
+			case 7:
+				stype = L"NOTE";
+				break;
+			case 8:
+				stype = L"NOBITS";
+				break;
+			case 9:
+				stype = L"REL";
+				break;
+			case 11:
+				stype = L"DYNSYM";
+				break;
+			case 14:
+				stype = L"INIT_ARRAY";
+				break;
+			case 15:
+				stype = L"FINI_ARRAY";
+				break;
+			case 0x6ffffffd:
+				stype = L"GNU_verdef";
+				break;
+			case 0x6ffffffe:
+				stype = L"GNU_verneed";
+				break;
+			case 0x6fffffff:
+				stype = L"GNU_versym";
+				break;
+			default:
+				stype = L"";
+				break;
+			}
+
+			IT.mask = LVIF_TEXT;
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Idx");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%d", i);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Type");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%s", stype);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Offset");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%08X", shheader->sh_offset);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Addr");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%08X", shheader->sh_addr);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Size");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%04X", shheader->sh_size);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Flags");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%s", sflag);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Lnk");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iSubItem = 1;
+			wsprintf(temp, L"%d", shheader->sh_link);
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"Name");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			int len = MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, (char*)((DWORD)strtbladdr + shheader->sh_name), -1, NULL, NULL);
+			MultiByteToWideChar(CP_ACP, 0, (char*)((DWORD)strtbladdr + shheader->sh_name), -1, temp, len);
+
+			IT.iSubItem = 1;
+			IT.pszText = temp;
+			ListView_SetItem(listview[NumOfTreeitems].hList, &IT);
+
+			IT.iItem = dwSecHeaderItems++;
+			IT.iSubItem = 0;
+			wsprintf(temp, L"");
+			IT.pszText = temp;
+			ListView_InsertItem(listview[NumOfTreeitems].hList, &IT);
+
+			shheader++;
+		}
+		NumOfTreeitems++;
+
+		//---------------------------------------
+		COL.hParent = 0;
+		COL.hInsertAfter = TVI_LAST;
+		COL.item.mask = TVIF_TEXT;
+		COL.item.pszText = L"HEX VIEW";
+		listview[NumOfTreeitems].treeitem = TreeView_InsertItem(hTree, &COL);
+
+		listview[NumOfTreeitems].hList = CreateWindowEx(WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME, WC_LISTVIEW, NULL, WS_CHILD | WS_BORDER | LVS_REPORT,
+			rect.right / 2 + 10, rect.top + 50, rect.right / 2 - 20, rect.bottom - 70, hWnd, NULL, hInst, NULL);
+
+		SendMessage(listview[NumOfTreeitems].hList, WM_SETFONT, (WPARAM)hFont, (LPARAM)false);
+
+		LV.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+		LV.fmt = LVCFMT_LEFT;
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 0;
+		LV.pszText = L"HEX CODES";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 0, &LV);
+
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 1;
+		LV.pszText = L"STRINGS";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 1, &LV);
+
+		LV.cx = (rect.right / 2 - 20) / 2;
+		LV.iSubItem = 2;
+		LV.pszText = L"RVA";
+		ListView_InsertColumn(listview[NumOfTreeitems].hList, 2, &LV);
+		
+		InsertHexcode(base_ptr, (PVOID)((DWORD)base_ptr + (GetFileSize(hFile, 0))), listview[NumOfTreeitems].hList);
+		NumOfTreeitems++;
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER) {
-		MessageBox(hWnd, L"경고! 파일이 패킹되어 있을 수 있습니다.\n프로그램을 종료합니다.", L"파일 로드 실패", MB_OK);
-		PostQuitMessage(0);
+		UnmapViewOfFile(base_ptr);
+		CloseHandle(hFile);
+		CloseHandle(hMap);
+		return;
 	}
+
+	UnmapViewOfFile(base_ptr);
+	CloseHandle(hFile);
+	CloseHandle(hMap);
+	return;
 }
 
 VOID RemoveValues(HWND hWnd) {
-	__try {
+ 	__try {
 		if (data_directories_present[2] == TRUE) {
 			free(rsrc_section.rsrc_data);
 			for (int i = 0; i < rsrc_section.numofnameid; i++) {
@@ -4315,7 +5399,6 @@ VOID RemoveValues(HWND hWnd) {
 			}
 
 			free(rsrc_section.rsrc_nameid);
-
 			free(rsrc_section.rsrc_types.rsrc_direc_ents);
 		}
 
@@ -4323,7 +5406,7 @@ VOID RemoveValues(HWND hWnd) {
 			temp_prev = certificate_table.next_list;
 			temp_next = certificate_table.next_list->next_list;
 
-			while (temp_next != NULL) {
+		while (temp_next != NULL) {
 				free(temp_prev);
 				temp_prev = temp_next;
 				temp_next = ((CERTIFICATE_TABLE *)temp_prev)->next_list;
@@ -4334,7 +5417,7 @@ VOID RemoveValues(HWND hWnd) {
 			temp_prev = reloc.next_list;
 			temp_next = reloc.next_list->next_list;
 
-			while (temp_next != NULL) {
+				while (temp_next != NULL) {
 				free(temp_prev);
 				temp_prev = temp_next;
 				temp_next = ((RELOCATION *)temp_prev)->next_list;
@@ -4348,6 +5431,8 @@ VOID RemoveValues(HWND hWnd) {
 		for (int i = 0; i < 50 && listview[i].hList != NULL; i++) {
 			DestroyWindow(listview[i].hList);
 		}
+		
+		DestroyWindow(hTree);
 
 		for (int i = 0; body_listview != NULL && i < file_header->NumberOfSections; i++) {
 			DestroyWindow(body_listview[i].hList);
@@ -4355,22 +5440,25 @@ VOID RemoveValues(HWND hWnd) {
 
 		if (body_listview != NULL) {
 			free(body_listview);
-			DestroyWindow(hTree);
-			UnmapViewOfFile(base_ptr);
-			CloseHandle(hFile);
-			CloseHandle(hMap);
 		}
+		
 	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
+	 __except (EXCEPTION_EXECUTE_HANDLER) {
+		
 	}
-	memset(listview, NULL, sizeof(listview));
-	hTree = NULL;
-	body_listview = NULL;
+	 	memset(listview, NULL, sizeof(listview));
+	 	hTree = NULL;
+	 	body_listview = NULL;
 
-	global_RVA = 0;
-	local_RVA = 0;
+		global_RVA = 0;
+	 	local_RVA = 0;
 
-	InvalidateRgn(hWnd, NULL, TRUE);
+		dos_header = 0;
+		section_header = 0;
+		nt_header = 0;
+		file_header = 0;
+
+		InvalidateRgn(hWnd, NULL, TRUE);
 }
 
 VOID InsertHexcode(PVOID Start, PVOID End, HWND hWndOfListview) {

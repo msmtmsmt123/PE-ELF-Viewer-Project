@@ -1,5 +1,5 @@
 ﻿  WinMain.cpp
-c:\users\administrator\source\repos\pe viewer project\winmain.cpp(434): warning C4477: 'sprintf' : 서식 문자열 '%s'에 'char *' 형식의 인수가 필요하지만 variadic 인수 1의 형식이 'WORD *'입니다.
-c:\users\administrator\source\repos\pe viewer project\winmain.cpp(562): warning C4477: 'sprintf' : 서식 문자열 '%s'에 'char *' 형식의 인수가 필요하지만 variadic 인수 1의 형식이 'DWORD *'입니다.
-  PE Viewer Project.vcxproj -> C:\Users\Administrator\source\repos\PE Viewer Project\Debug\PE Viewer Project.exe
-  PE Viewer Project.vcxproj -> C:\Users\Administrator\source\repos\PE Viewer Project\Debug\PE Viewer Project.pdb (Partial PDB)
+c:\users\administrator\desktop\pe viewer project\winmain.cpp(463): warning C4477: 'sprintf' : 서식 문자열 '%s'에 'char *' 형식의 인수가 필요하지만 variadic 인수 1의 형식이 'WORD *'입니다.
+c:\users\administrator\desktop\pe viewer project\winmain.cpp(591): warning C4477: 'sprintf' : 서식 문자열 '%s'에 'char *' 형식의 인수가 필요하지만 variadic 인수 1의 형식이 'DWORD *'입니다.
+  PE Viewer Project.vcxproj -> C:\Users\Administrator\Desktop\PE Viewer Project\Debug\PE Viewer Project.exe
+  PE Viewer Project.vcxproj -> C:\Users\Administrator\Desktop\PE Viewer Project\Debug\PE Viewer Project.pdb (Partial PDB)
